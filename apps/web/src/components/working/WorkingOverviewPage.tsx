@@ -1,7 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import * as Schema from "effect/Schema";
-import { FolderIcon } from "lucide-react";
+import { ChevronDownIcon, FolderIcon } from "lucide-react";
+import { useState } from "react";
 
 import { isElectron } from "~/env";
 import { useNowMinute } from "../../hooks/useNowMinute";
@@ -35,9 +36,14 @@ import { WorkingUsageStrip } from "./WorkingUsageStrip";
  */
 const MAX_LIVE_ROWS = 6;
 
-const COLLAPSED_SECTIONS_KEY = "t3code:working-overview:collapsed-sections";
-const EMPTY_COLLAPSED: ReadonlyArray<string> = [];
-const COLLAPSED_SECTIONS_SCHEMA = Schema.Array(Schema.String);
+const EXPANDED_SECTIONS_KEY = "t3code:working-overview:expanded-sections";
+/** Like the sidebar, the inbox stays open and its shelves start closed. */
+const DEFAULT_EXPANDED: ReadonlyArray<string> = ["inbox", "pull-requests"];
+const EXPANDED_SECTIONS_SCHEMA = Schema.Array(Schema.String);
+const SETTLED_INITIAL_COUNT = 10;
+const SETTLED_PAGE_COUNT = 25;
+
+const isLive = (label: string) => label !== "Completed" && label !== "Failed";
 
 export function WorkingOverviewPage() {
   const threads = useQuietThreadShells();
@@ -50,15 +56,16 @@ export function WorkingOverviewPage() {
   const liveShellEnvironmentIds = useAtomValue(liveShellEnvironmentIdsAtom);
   // Minute ticks keep elapsed labels current without repainting every second.
   const nowMs = Date.parse(`${useNowMinute()}:00.000Z`);
-  const [collapsed, setCollapsed] = useLocalStorage(
-    COLLAPSED_SECTIONS_KEY,
-    EMPTY_COLLAPSED,
-    COLLAPSED_SECTIONS_SCHEMA,
+  const [expanded, setExpanded] = useLocalStorage(
+    EXPANDED_SECTIONS_KEY,
+    DEFAULT_EXPANDED,
+    EXPANDED_SECTIONS_SCHEMA,
   );
   const toggleSection = (id: string) =>
-    setCollapsed((current) =>
+    setExpanded((current) =>
       current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id],
     );
+  const [settledVisibleCount, setSettledVisibleCount] = useState(SETTLED_INITIAL_COUNT);
 
   const disconnectedEnvironmentIds = new Set<string>(
     environmentConnections
@@ -90,7 +97,7 @@ export function WorkingOverviewPage() {
   });
   const pullRequests = collectWorkingPullRequests(sections);
   const liveKeys = new Set(
-    [...sections["needs-you"], ...sections.working]
+    [...sections.working, ...sections.inbox.filter((entry) => isLive(entry.status.label))]
       .slice(0, MAX_LIVE_ROWS)
       .map((entry) => `${entry.thread.environmentId}:${entry.thread.id}`),
   );
@@ -118,31 +125,30 @@ export function WorkingOverviewPage() {
             <div className="flex min-w-0 flex-col gap-3">
               {total === 0 ? (
                 <p className="px-2 py-10 text-center text-sm text-muted-foreground">
-                  No threads are running and nothing is waiting to be read.
+                  Nothing in your inbox, and no threads are running.
                 </p>
               ) : (
                 WORKING_OVERVIEW_SECTIONS.map((section) => {
                   const entries = sections[section.id];
                   if (entries.length === 0) return null;
+                  const shownEntries =
+                    section.id === "settled" ? entries.slice(0, settledVisibleCount) : entries;
+                  const hiddenCount = entries.length - shownEntries.length;
                   const groups = projectFolders
-                    ? groupEntriesByProject(entries, projectGroups)
-                    : [{ key: "all", name: null, entries }];
+                    ? groupEntriesByProject(shownEntries, projectGroups)
+                    : [{ key: "all", name: null, entries: shownEntries }];
                   return (
                     <section key={section.id} aria-label={section.title}>
                       <CollapsibleSectionHeader
-                        expanded={!collapsed.includes(section.id)}
+                        expanded={expanded.includes(section.id)}
                         onClick={() => toggleSection(section.id)}
                         accessory={
-                          <span className="font-normal tabular-nums">
-                            {section.id === "settled"
-                              ? `${entries.length} · last 24 hours`
-                              : entries.length}
-                          </span>
+                          <span className="font-normal tabular-nums">{entries.length}</span>
                         }
                       >
                         {section.title}
                       </CollapsibleSectionHeader>
-                      {collapsed.includes(section.id) ? null : (
+                      {!expanded.includes(section.id) ? null : (
                         <>
                           {groups.map((group) => (
                             <div key={group.key}>
@@ -180,6 +186,19 @@ export function WorkingOverviewPage() {
                               </ul>
                             </div>
                           ))}
+                          {hiddenCount > 0 ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setSettledVisibleCount((count) => count + SETTLED_PAGE_COUNT)
+                              }
+                              className="flex h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-xs text-muted-foreground outline-none hover:bg-accent/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                            >
+                              {/* Plus means "add", so revealing more uses a chevron. */}
+                              <ChevronDownIcon aria-hidden className="size-3.5 shrink-0" />
+                              Show {Math.min(hiddenCount, SETTLED_PAGE_COUNT)} more
+                            </button>
+                          ) : null}
                         </>
                       )}
                     </section>
@@ -189,7 +208,7 @@ export function WorkingOverviewPage() {
             </div>
             <WorkingPullRequests
               pullRequests={pullRequests}
-              expanded={!collapsed.includes("pull-requests")}
+              expanded={expanded.includes("pull-requests")}
               onToggle={() => toggleSection("pull-requests")}
               className="@4xl/working:border-s @4xl/working:ps-2"
             />

@@ -1,5 +1,6 @@
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { resolveThreadProviderStack } from "@t3tools/client-runtime/state/models";
+import { snoozeWakeLabel } from "@t3tools/client-runtime/state/thread-settled";
 import {
   resolveThreadCurrentPullRequestLink,
   resolveThreadPullRequestBadge,
@@ -243,6 +244,11 @@ function useLiveActivityLine(
 }
 
 function rowTiming(thread: SidebarThreadSummary, status: WorkingOverviewStatus, nowMs: number) {
+  if (status.label === "Snoozed") {
+    return thread.snoozedUntil
+      ? `wakes in ${snoozeWakeLabel(thread.snoozedUntil, { now: new Date(nowMs).toISOString() })}`
+      : null;
+  }
   const finished =
     status.label === "Settled" || status.label === "Completed" || status.label === "Failed";
   const since =

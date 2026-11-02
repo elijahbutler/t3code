@@ -1,5 +1,12 @@
 import { threadKey } from "@t3tools/client-runtime/state/entities";
-import { sortWorkingThreadsBySend } from "@t3tools/client-runtime/state/thread-inbox";
+import {
+  sortInboxThreadsByReturn,
+  sortWorkingThreadsBySend,
+} from "@t3tools/client-runtime/state/thread-inbox";
+import {
+  effectiveSnoozed,
+  type ThreadSnoozeShell,
+} from "@t3tools/client-runtime/state/thread-settled";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import {
   isListedThreadLineage,
@@ -13,30 +20,24 @@ import {
   type ThreadStatusPill,
 } from "../Sidebar.logic";
 
-export type WorkingOverviewSectionId = "needs-you" | "working" | "completed" | "settled";
+export type WorkingOverviewSectionId = "inbox" | "working" | "snoozed" | "settled";
 
-/** Live work first; finished work collects at the bottom, then what was settled. */
+/** The sidebar's order: the inbox, then the Working, Snoozed, and Settled shelves. */
 export const WORKING_OVERVIEW_SECTIONS: ReadonlyArray<{
   readonly id: WorkingOverviewSectionId;
   readonly title: string;
 }> = [
-  { id: "needs-you", title: "Needs you" },
+  { id: "inbox", title: "Inbox" },
   { id: "working", title: "Working" },
-  { id: "completed", title: "Completed" },
+  { id: "snoozed", title: "Snoozed" },
   { id: "settled", title: "Settled" },
 ];
 
-/**
- * Completed holds finished threads until they settle, which the server does per the
- * user's auto-settle settings. Settled then lists them for this long.
- */
-const SETTLED_WINDOW_MS = 24 * 60 * 60 * 1000;
-const MAX_ROWS_PER_FINISHED_SECTION = 30;
 /** A finished subagent stays listed this long, or until its parent is next opened. */
 const RECENT_SUBAGENT_MS = 60 * 60 * 1000;
 
 export interface WorkingOverviewStatus extends Omit<ThreadStatusPill, "label"> {
-  readonly label: ThreadStatusPill["label"] | "Settled";
+  readonly label: ThreadStatusPill["label"] | "Snoozed" | "Settled";
 }
 
 /** A completion the user already saw. It has no sidebar pill, so the page names it. */
@@ -47,12 +48,25 @@ export const SEEN_COMPLETION_STATUS: WorkingOverviewStatus = {
   pulse: false,
 };
 
+const SNOOZED_STATUS: WorkingOverviewStatus = {
+  label: "Snoozed",
+  colorClass: "text-muted-foreground",
+  dotClass: "bg-muted-foreground/30",
+  pulse: false,
+};
+
 const SETTLED_STATUS: WorkingOverviewStatus = {
   label: "Settled",
   colorClass: "text-muted-foreground",
   dotClass: "bg-muted-foreground/30",
   pulse: false,
 };
+
+const WORKING_LABELS: ReadonlySet<ThreadStatusPill["label"]> = new Set([
+  "Working",
+  "Connecting",
+  "Waiting",
+]);
 
 export interface WorkingOverviewEntry<T> {
   readonly thread: T;
@@ -69,47 +83,40 @@ export type WorkingOverviewSections<T> = Record<
   ReadonlyArray<WorkingOverviewEntry<T>>
 >;
 
-const SECTION_BY_STATUS: Record<ThreadStatusPill["label"], WorkingOverviewSectionId> = {
-  "Pending Approval": "needs-you",
-  "Awaiting Input": "needs-you",
-  "Guest Request": "needs-you",
-  "Plan Ready": "needs-you",
-  Failed: "needs-you",
-  Working: "working",
-  Connecting: "working",
-  Waiting: "working",
-  Completed: "completed",
-};
-
-type WorkingOverviewThreadInput = Pick<
-  EnvironmentThreadShell,
-  | "environmentId"
-  | "id"
-  | "projectId"
-  | "archivedAt"
-  | "lineage"
-  | "createdAt"
-  | "latestRun"
-  | "latestUserAuthoredMessageAt"
-  | "runtime"
-  | "hasActionableProposedPlan"
-  | "hasPendingApprovals"
-  | "hasPendingUserInput"
-  | "pendingSubagentRequest"
-  | "pendingGuestMessageCount"
-  | "interactionMode"
-  | "pendingBackgroundTasks"
-  | "blockedOnThreadWait"
-  | "delegatedFrom"
-  | "settledOverride"
-  | "settledAt"
->;
+type WorkingOverviewThreadInput = ThreadSnoozeShell &
+  Pick<
+    EnvironmentThreadShell,
+    | "environmentId"
+    | "id"
+    | "projectId"
+    | "archivedAt"
+    | "lineage"
+    | "createdAt"
+    | "unsettledAt"
+    | "latestRun"
+    | "latestUserAuthoredMessageAt"
+    | "runtime"
+    | "hasActionableProposedPlan"
+    | "hasPendingApprovals"
+    | "hasPendingUserInput"
+    | "pendingSubagentRequest"
+    | "pendingGuestMessageCount"
+    | "interactionMode"
+    | "pendingBackgroundTasks"
+    | "blockedOnThreadWait"
+    | "delegatedFrom"
+    | "settledOverride"
+    | "settledAt"
+    | "snoozedUntil"
+    | "snoozedAt"
+  >;
 
 const timestampMs = (iso: string | null | undefined) => Date.parse(iso ?? "") || 0;
 
 /**
- * Sorts the sidebar's visible threads by what they need from the user. Finished threads
- * stay in Completed until they settle, then show in Settled for a day.
+ * Places the sidebar's visible threads in the sidebar's sections, with its precedence:
+ * snoozed, then settled, then working, then the inbox. The inbox keeps threads that need
+ * the user and finished ones; idle threads that never finished are left out.
  */
 export function groupWorkingOverviewThreads<T extends WorkingOverviewThreadInput>(input: {
   readonly threads: ReadonlyArray<T>;
@@ -118,6 +125,7 @@ export function groupWorkingOverviewThreads<T extends WorkingOverviewThreadInput
   readonly lastVisitedAt: (thread: T) => string | undefined;
   readonly nowMs: number;
 }): WorkingOverviewSections<T> {
+  const now = new Date(input.nowMs).toISOString();
   const statusOf = (thread: T) =>
     resolveThreadStatusPill({ thread: { ...thread, lastVisitedAt: input.lastVisitedAt(thread) } });
   const childrenByParent = new Map<string, Array<WorkingOverviewEntry<T>["children"][number]>>();
@@ -131,26 +139,26 @@ export function groupWorkingOverviewThreads<T extends WorkingOverviewThreadInput
   }
 
   const sections: Record<WorkingOverviewSectionId, Array<WorkingOverviewEntry<T>>> = {
-    "needs-you": [],
+    inbox: [],
     working: [],
-    completed: [],
+    snoozed: [],
     settled: [],
   };
   const visible = filterSidebarV2VisibleThreads(input.threads, null, input.delegatedUnderParent);
-  for (const thread of sortWorkingThreadsBySend(visible)) {
+  for (const thread of sortInboxThreadsByReturn(visible)) {
     if (input.disconnectedEnvironmentIds.has(thread.environmentId)) continue;
     const pill = statusOf(thread);
-    // Settled wins, as in the sidebar; new activity un-settles a thread on the server.
+    // New activity un-snoozes and un-settles a thread on the server, as in the sidebar.
     const placement: { section: WorkingOverviewSectionId; status: WorkingOverviewStatus } | null =
-      thread.settledOverride === "settled"
-        ? input.nowMs - timestampMs(thread.settledAt) <= SETTLED_WINDOW_MS
+      effectiveSnoozed(thread, { now })
+        ? { section: "snoozed", status: SNOOZED_STATUS }
+        : thread.settledOverride === "settled"
           ? { section: "settled", status: SETTLED_STATUS }
-          : null
-        : pill !== null
-          ? { section: SECTION_BY_STATUS[pill.label], status: pill }
-          : thread.latestRun?.status === "completed"
-            ? { section: "completed", status: SEEN_COMPLETION_STATUS }
-            : null;
+          : pill !== null
+            ? { section: WORKING_LABELS.has(pill.label) ? "working" : "inbox", status: pill }
+            : thread.latestRun?.status === "completed"
+              ? { section: "inbox", status: SEEN_COMPLETION_STATUS }
+              : null;
     if (placement === null) continue;
     // Idle subagents are noise here; finished ones stay while they are news.
     const newsSince = Math.min(
@@ -168,18 +176,21 @@ export function groupWorkingOverviewThreads<T extends WorkingOverviewThreadInput
     );
     sections[placement.section].push({ thread, status: placement.status, children });
   }
-  sections.completed = sections.completed
-    .toSorted(
-      (left, right) =>
-        timestampMs(right.thread.latestRun?.completedAt) -
-        timestampMs(left.thread.latestRun?.completedAt),
-    )
-    .slice(0, MAX_ROWS_PER_FINISHED_SECTION);
-  sections.settled = sections.settled
-    .toSorted(
-      (left, right) => timestampMs(right.thread.settledAt) - timestampMs(left.thread.settledAt),
-    )
-    .slice(0, MAX_ROWS_PER_FINISHED_SECTION);
+  // The sidebar's Working shelf orders by send time, not by return.
+  const sendOrder = new Map(
+    sortWorkingThreadsBySend(sections.working.map((entry) => entry.thread)).map(
+      (thread, index) => [thread, index] as const,
+    ),
+  );
+  sections.working = sections.working.toSorted(
+    (left, right) => sendOrder.get(left.thread)! - sendOrder.get(right.thread)!,
+  );
+  sections.snoozed = sections.snoozed.toSorted(
+    (left, right) => timestampMs(left.thread.snoozedUntil) - timestampMs(right.thread.snoozedUntil),
+  );
+  sections.settled = sections.settled.toSorted(
+    (left, right) => timestampMs(right.thread.settledAt) - timestampMs(left.thread.settledAt),
+  );
   return sections;
 }
 
@@ -265,20 +276,24 @@ export function collectWorkingPullRequests<
   T extends Pick<EnvironmentThreadShell, "environmentId" | "id" | "pullRequests">,
 >(sections: WorkingOverviewSections<T>): Array<WorkingPullRequest<T>> {
   const byUrl = new Map<string, WorkingPullRequest<T>>();
-  for (const section of ["needs-you", "working", "completed", "settled"] as const) {
+  for (const section of ["working", "inbox", "snoozed", "settled"] as const) {
     for (const entry of sections[section]) {
       const owners = [entry, ...entry.children.filter((child) => child.status !== null)];
       for (const { thread, status } of owners) {
         if (status === null) continue;
+        const active =
+          section === "working" ||
+          (section === "inbox" && status.label !== "Completed" && status.label !== "Failed");
         for (const link of thread.pullRequests) {
-          if (link.snapshot === null || link.snapshot.state !== "open" || byUrl.has(link.url)) {
-            continue;
-          }
+          if (link.snapshot === null || link.snapshot.state !== "open") continue;
+          // A PR shared by several threads belongs to the one working on it.
+          const existing = byUrl.get(link.url);
+          if (existing !== undefined && (existing.active || !active)) continue;
           byUrl.set(link.url, {
             link: { ...link, snapshot: link.snapshot },
             thread,
             status,
-            active: section === "needs-you" || section === "working",
+            active,
           });
         }
       }

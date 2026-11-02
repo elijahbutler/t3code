@@ -35,7 +35,7 @@ const thread = (id: string, overrides: Parameters<typeof makeThreadFixture>[0] =
   makeThreadFixture({ id: ThreadId.make(id), ...overrides });
 
 describe("groupWorkingOverviewThreads", () => {
-  it("groups live threads by what they need, keeps completions until they settle, and leaves out archived and offline ones", () => {
+  it("places threads in the sidebar's sections and leaves out archived and offline ones", () => {
     const offline = EnvironmentId.make("environment-offline");
     const visits = new Map([
       ["unseen-done", "2026-03-09T08:00:00.000Z"],
@@ -75,6 +75,18 @@ describe("groupWorkingOverviewThreads", () => {
           settledOverride: "settled",
           settledAt: "2026-03-02T11:00:00.000Z",
         }),
+        thread("snoozed-until-tonight", {
+          runtime: runtime("idle"),
+          latestRun: completedRun,
+          snoozedAt: "2026-03-09T09:30:00.000Z",
+          snoozedUntil: "2026-03-09T20:00:00.000Z",
+        }),
+        thread("snooze-expired", {
+          runtime: runtime("idle"),
+          latestRun: completedRun,
+          snoozedAt: "2026-03-08T09:30:00.000Z",
+          snoozedUntil: "2026-03-09T08:00:00.000Z",
+        }),
         thread("archived", {
           runtime: runtime("running"),
           archivedAt: "2026-03-09T10:00:00.000Z",
@@ -88,12 +100,25 @@ describe("groupWorkingOverviewThreads", () => {
     });
 
     const ids = (group: keyof typeof groups) => groups[group].map((entry) => entry.thread.id);
-    expect(ids("needs-you")).toEqual(["approval"]);
+    expect(ids("inbox")).toEqual([
+      "seen-done",
+      "snooze-expired",
+      "unseen-done",
+      "old-done",
+      "old-unseen-done",
+      "approval",
+    ]);
     expect(ids("working")).toEqual(["running"]);
-    expect(ids("completed")).toEqual(["seen-done", "unseen-done", "old-done", "old-unseen-done"]);
-    expect(ids("settled")).toEqual(["settled-today", "settled-but-stuck-waiting"]);
-    expect(groups["needs-you"][0]?.status.label).toBe("Pending Approval");
-    expect(groups.completed.find((entry) => entry.thread.id === "seen-done")?.status).toBe(
+    expect(ids("snoozed")).toEqual(["snoozed-until-tonight"]);
+    expect(ids("settled")).toEqual([
+      "settled-today",
+      "settled-but-stuck-waiting",
+      "settled-last-week",
+    ]);
+    expect(groups.inbox.find((entry) => entry.thread.id === "approval")?.status.label).toBe(
+      "Pending Approval",
+    );
+    expect(groups.inbox.find((entry) => entry.thread.id === "seen-done")?.status).toBe(
       SEEN_COMPLETION_STATUS,
     );
   });
@@ -218,7 +243,6 @@ describe("collectWorkingPullRequests", () => {
       })),
     });
     const pullRequests = collectWorkingPullRequests({
-      "needs-you": [],
       working: [
         entry(
           "live",
@@ -226,12 +250,16 @@ describe("collectWorkingPullRequests", () => {
           [{ id: "live-subagent", pullRequests: [link(4, "open", "2026-03-09T07:00:00.000Z")] }],
         ),
       ],
-      completed: [
-        entry("done", [
-          link(1, "open", "2026-03-09T11:00:00.000Z"),
-          link(2, "open", "2026-03-09T11:00:00.000Z"),
-          link(3, "merged", "2026-03-09T11:00:00.000Z"),
-        ]),
+      snoozed: [],
+      inbox: [
+        {
+          ...entry("done", [
+            link(1, "open", "2026-03-09T11:00:00.000Z"),
+            link(2, "open", "2026-03-09T11:00:00.000Z"),
+            link(3, "merged", "2026-03-09T11:00:00.000Z"),
+          ]),
+          status: SEEN_COMPLETION_STATUS,
+        },
       ],
       settled: [],
     });
