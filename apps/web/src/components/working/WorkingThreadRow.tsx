@@ -1,4 +1,4 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { resolveThreadProviderStack } from "@t3tools/client-runtime/state/models";
 import {
   resolveThreadCurrentPullRequestLink,
@@ -6,7 +6,6 @@ import {
 } from "@t3tools/client-runtime/thread-pull-requests";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { GitBranchIcon } from "lucide-react";
 import { useEffect, useState, type MouseEvent } from "react";
 
 import { useSupportsMultiplePullRequests } from "../../hooks/useSupportsMultiplePullRequests";
@@ -14,17 +13,19 @@ import { useOpenPrLink } from "../../lib/openPullRequestLink";
 import { cn } from "../../lib/utils";
 import { useRightPanelStore } from "../../rightPanelStore";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
+import { useProject } from "../../state/entities";
 import { environmentThreadDetails } from "../../state/threads";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { formatElapsedDurationLabel } from "../../timestampFormat";
 import type { SidebarThreadSummary } from "../../types";
-import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
+import { ProjectFavicon } from "../ProjectFavicon";
 import type { SidebarProviderEntry } from "../sidebar/SidebarThreadRow";
 import { resolveWorkingStartedAt } from "../Sidebar.logic";
 import {
   linkedPullRequestSnapshotStatus,
   prStatusIndicator,
   ThreadPullRequestBadgeControl,
+  ThreadRowTrailingStatus,
 } from "../ThreadStatusIndicators";
 import { InlineButton } from "../ui/button";
 import {
@@ -59,6 +60,7 @@ export function WorkingThreadRow({
   const { thread, status, children } = entry;
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const activity = useLiveActivityLine(thread.environmentId, thread.id, live);
+  const project = useProject(scopeProjectRef(thread.environmentId, thread.projectId));
   const provider = providerEntries?.get(resolveThreadProviderStack(thread).at(-1) ?? "") ?? null;
   const modelName =
     provider?.models.find((model) => model.slug === thread.modelSelection.model)?.name ??
@@ -70,7 +72,7 @@ export function WorkingThreadRow({
       : (activity ?? thread.goal?.objective ?? thread.pendingBackgroundTasks[0]?.description);
   const facts = [
     projectName,
-    provider === null ? modelName : `${provider.displayName} · ${modelName}`,
+    modelName,
     activeChildren > 0
       ? `${activeChildren} ${activeChildren === 1 ? "subagent" : "subagents"} active`
       : null,
@@ -94,28 +96,16 @@ export function WorkingThreadRow({
           className="absolute inset-0 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         />
         <span className="pointer-events-none flex h-5 items-center">
-          {provider === null ? null : (
-            <ProviderInstanceIcon
-              driverKind={provider.driverKind}
-              displayName={provider.displayName}
-              accentColor={provider.accentColor}
-              acpRegistryAgentId={provider.acpRegistryAgentId}
-              acpRegistryIconUrl={provider.acpRegistryIconUrl}
-              size="compact"
-            />
-          )}
+          {project === null ? null : <ProjectFavicon project={project} className="size-4" />}
         </span>
         <span className="pointer-events-none flex min-w-0 flex-col">
           <span className="truncate text-sm leading-5 font-medium">{thread.title}</span>
           <span className="flex min-w-0 items-center gap-x-2 text-xs leading-4 text-muted-foreground">
             <span className="truncate">{facts.join(" · ")}</span>
-            {thread.branch === null ? null : (
-              <span className="hidden min-w-0 shrink items-center gap-1 @2xl/working:flex">
-                <GitBranchIcon aria-hidden className="size-3 shrink-0" />
-                <span className="truncate font-mono">{thread.branch}</span>
-              </span>
-            )}
-            <RowPullRequestBadge thread={thread} />
+            <span className="pointer-events-auto relative ms-auto flex shrink-0 items-center gap-2">
+              <ThreadRowTrailingStatus thread={thread} />
+              <RowPullRequestBadge thread={thread} />
+            </span>
           </span>
           {detail ? (
             <span
@@ -181,7 +171,7 @@ function RowPullRequestBadge({ thread }: { thread: SidebarThreadSummary }) {
   const openThread = () =>
     void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(threadRef) });
   return (
-    <span className="pointer-events-auto relative shrink-0">
+    <span className="shrink-0">
       <ThreadPullRequestBadgeControl
         render={<InlineButton />}
         text="full"
