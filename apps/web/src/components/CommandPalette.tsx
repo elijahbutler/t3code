@@ -53,6 +53,7 @@ import {
 } from "@t3tools/contracts";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
+  ActivityIcon,
   ArrowLeftIcon,
   BugIcon,
   ChartNoAxesColumnIcon,
@@ -1567,6 +1568,17 @@ function OpenCommandPaletteDialog(props: {
       },
     });
   }
+
+  actionItems.push({
+    kind: "action",
+    value: "action:working-overview",
+    searchTerms: ["working", "overview", "dashboard", "running", "threads", "agents", "status"],
+    title: "Open working overview",
+    icon: <ActivityIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/working" });
+    },
+  });
 
   actionItems.push({
     kind: "action",
