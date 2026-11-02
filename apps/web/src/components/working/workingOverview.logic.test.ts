@@ -1,8 +1,8 @@
-import { EnvironmentId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { makeThreadFixture } from "../../test-fixtures";
-import { groupWorkingOverviewThreads } from "./workingOverview.logic";
+import { groupEntriesByProject, groupWorkingOverviewThreads } from "./workingOverview.logic";
 
 const runtime = (status: "running" | "idle") => ({
   status,
@@ -22,10 +22,11 @@ const completedRun = {
   assistantMessageId: null,
 };
 
+const thread = (id: string, overrides: Parameters<typeof makeThreadFixture>[0] = {}) =>
+  makeThreadFixture({ id: ThreadId.make(id), ...overrides });
+
 describe("groupWorkingOverviewThreads", () => {
   it("groups live threads by what they need and leaves out quiet, archived, and offline ones", () => {
-    const thread = (id: string, overrides: Parameters<typeof makeThreadFixture>[0] = {}) =>
-      makeThreadFixture({ id: ThreadId.make(id), ...overrides });
     const offline = EnvironmentId.make("environment-offline");
     const visits = new Map([
       ["unseen-done", "2026-03-09T08:00:00.000Z"],
@@ -54,5 +55,67 @@ describe("groupWorkingOverviewThreads", () => {
     expect(ids("working")).toEqual(["running"]);
     expect(ids("finished")).toEqual(["unseen-done"]);
     expect(groups["needs-you"][0]?.status.label).toBe("Pending Approval");
+  });
+
+  it("nests subagents under their parent with their own status", () => {
+    const parentId = ThreadId.make("parent");
+    const subagentLineage = {
+      rootThreadId: parentId,
+      parentThreadId: parentId,
+      relationshipToParent: "subagent" as const,
+    };
+    const groups = groupWorkingOverviewThreads({
+      threads: [
+        thread("parent", { runtime: runtime("running") }),
+        thread("explorer", { runtime: runtime("running"), lineage: subagentLineage }),
+        thread("reviewer", { runtime: runtime("idle"), lineage: subagentLineage }),
+      ],
+      delegatedUnderParent: new Set(),
+      disconnectedEnvironmentIds: new Set(),
+      lastVisitedAt: () => undefined,
+    });
+
+    expect(groups.working.map((entry) => entry.thread.id)).toEqual(["parent"]);
+    expect(
+      groups.working[0]?.children.map((child) => [child.thread.id, child.status?.label ?? null]),
+    ).toEqual([
+      ["explorer", "Working"],
+      ["reviewer", null],
+    ]);
+  });
+});
+
+describe("groupEntriesByProject", () => {
+  it("follows the sidebar's project groups and keeps unknown projects last", () => {
+    const environmentId = EnvironmentId.make("environment-test");
+    const entry = (id: string, projectId: string) => ({
+      thread: thread(id, { projectId: ProjectId.make(projectId) }),
+      status: { label: "Working" as const, colorClass: "", dotClass: "", pulse: false },
+      children: [],
+    });
+    const grouped = groupEntriesByProject(
+      [entry("a", "web"), entry("b", "orphan"), entry("c", "api"), entry("d", "web-copy")],
+      [
+        {
+          projectKey: "api",
+          displayName: "api",
+          memberProjectRefs: [{ environmentId, projectId: "api" }],
+        },
+        {
+          projectKey: "web",
+          displayName: "web",
+          memberProjectRefs: [
+            { environmentId, projectId: "web" },
+            { environmentId, projectId: "web-copy" },
+          ],
+        },
+      ],
+    );
+
+    expect(grouped.map((group) => [group.name, group.entries.map((e) => e.thread.id)])).toEqual([
+      ["api", ["c"]],
+      ["web", ["a", "d"]],
+      [null, ["b"]],
+    ]);
   });
 });
