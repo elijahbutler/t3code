@@ -2,7 +2,13 @@ import { EnvironmentId, ProjectId, ProviderInstanceId, RunId, ThreadId } from "@
 import { describe, expect, it } from "vite-plus/test";
 
 import { makeThreadFixture } from "../../test-fixtures";
-import { groupEntriesByProject, groupWorkingOverviewThreads } from "./workingOverview.logic";
+import {
+  collectWorkingPullRequests,
+  groupEntriesByProject,
+  groupWorkingOverviewThreads,
+  latestActivityLine,
+  SEEN_COMPLETION_STATUS,
+} from "./workingOverview.logic";
 
 const runtime = (status: "running" | "idle") => ({
   status,
@@ -22,11 +28,13 @@ const completedRun = {
   assistantMessageId: null,
 };
 
+const NOW_MS = Date.parse("2026-03-09T12:00:00.000Z");
+
 const thread = (id: string, overrides: Parameters<typeof makeThreadFixture>[0] = {}) =>
   makeThreadFixture({ id: ThreadId.make(id), ...overrides });
 
 describe("groupWorkingOverviewThreads", () => {
-  it("groups live threads by what they need and leaves out quiet, archived, and offline ones", () => {
+  it("groups live threads by what they need, keeps a day of completions, and leaves out archived and offline ones", () => {
     const offline = EnvironmentId.make("environment-offline");
     const visits = new Map([
       ["unseen-done", "2026-03-09T08:00:00.000Z"],
@@ -39,6 +47,10 @@ describe("groupWorkingOverviewThreads", () => {
         thread("approval", { runtime: runtime("running"), hasPendingApprovals: true }),
         thread("unseen-done", { runtime: runtime("idle"), latestRun: completedRun }),
         thread("seen-done", { runtime: runtime("idle"), latestRun: completedRun }),
+        thread("old-done", {
+          runtime: runtime("idle"),
+          latestRun: { ...completedRun, completedAt: "2026-03-07T09:05:00.000Z" },
+        }),
         thread("archived", {
           runtime: runtime("running"),
           archivedAt: "2026-03-09T10:00:00.000Z",
@@ -48,13 +60,17 @@ describe("groupWorkingOverviewThreads", () => {
       delegatedUnderParent: new Set(),
       disconnectedEnvironmentIds: new Set([offline]),
       lastVisitedAt: (entry) => visits.get(entry.id),
+      nowMs: NOW_MS,
     });
 
     const ids = (group: keyof typeof groups) => groups[group].map((entry) => entry.thread.id);
     expect(ids("needs-you")).toEqual(["approval"]);
     expect(ids("working")).toEqual(["running"]);
-    expect(ids("finished")).toEqual(["unseen-done"]);
+    expect(ids("completed")).toEqual(["seen-done", "unseen-done"]);
     expect(groups["needs-you"][0]?.status.label).toBe("Pending Approval");
+    expect(groups.completed.find((entry) => entry.thread.id === "seen-done")?.status).toBe(
+      SEEN_COMPLETION_STATUS,
+    );
   });
 
   it("nests subagents under their parent with their own status", () => {
@@ -73,6 +89,7 @@ describe("groupWorkingOverviewThreads", () => {
       delegatedUnderParent: new Set(),
       disconnectedEnvironmentIds: new Set(),
       lastVisitedAt: () => undefined,
+      nowMs: NOW_MS,
     });
 
     expect(groups.working.map((entry) => entry.thread.id)).toEqual(["parent"]);
@@ -117,5 +134,79 @@ describe("groupEntriesByProject", () => {
       ["web", ["a", "d"]],
       [null, ["b"]],
     ]);
+  });
+});
+
+describe("collectWorkingPullRequests", () => {
+  it("lists each open pull request once, with live threads first", () => {
+    const link = (number: number, state: "open" | "merged", updatedAt: string) => ({
+      number,
+      url: `https://github.com/acme/web/pull/${number}`,
+      snapshot: {
+        state,
+        title: `PR ${number}`,
+        headBranch: `branch-${number}`,
+        baseBranch: "main",
+        isDraft: false,
+        updatedAt,
+        syncedAt: updatedAt,
+      },
+      stack: null,
+    });
+    const entry = (id: string, pullRequests: ReadonlyArray<ReturnType<typeof link>>) => ({
+      thread: thread(id, { pullRequests: pullRequests as never }),
+      status: { label: "Working" as const, colorClass: "", dotClass: "", pulse: false },
+      children: [],
+    });
+    const pullRequests = collectWorkingPullRequests({
+      "needs-you": [],
+      working: [entry("live", [link(2, "open", "2026-03-09T08:00:00.000Z")])],
+      completed: [
+        entry("done", [
+          link(1, "open", "2026-03-09T11:00:00.000Z"),
+          link(2, "open", "2026-03-09T11:00:00.000Z"),
+          link(3, "merged", "2026-03-09T11:00:00.000Z"),
+        ]),
+      ],
+    });
+
+    expect(
+      pullRequests.map((pullRequest) => [
+        pullRequest.link.number,
+        pullRequest.thread.id,
+        pullRequest.active,
+      ]),
+    ).toEqual([
+      [2, "live", true],
+      [1, "done", false],
+    ]);
+  });
+});
+
+describe("latestActivityLine", () => {
+  const item = (ordinal: number, fields: Record<string, unknown>) =>
+    ({ ordinal, ...fields }) as never;
+
+  it("describes the newest item the user would recognize", () => {
+    expect(
+      latestActivityLine({
+        turnItems: [
+          item(1, {
+            type: "assistant_message",
+            text: "Looking at the tests.\n\nFound two failures.",
+          }),
+          item(3, { type: "todo_list" }),
+          item(2, { type: "command_execution", input: "vp test run src/cart.test.ts" }),
+        ],
+      }),
+    ).toBe("$ vp test run src/cart.test.ts");
+    expect(
+      latestActivityLine({
+        turnItems: [
+          item(1, { type: "assistant_message", text: "Looking.\n\nFound two failures.\n" }),
+        ],
+      }),
+    ).toBe("Found two failures.");
+    expect(latestActivityLine({ turnItems: [item(1, { type: "todo_list" })] })).toBeNull();
   });
 });
