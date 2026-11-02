@@ -1,4 +1,5 @@
 import { EnvironmentId, ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
+import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { describe, expect, it } from "vite-plus/test";
 
 import { makeThreadFixture } from "../../test-fixtures";
@@ -39,6 +40,7 @@ describe("groupWorkingOverviewThreads", () => {
     const visits = new Map([
       ["unseen-done", "2026-03-09T08:00:00.000Z"],
       ["seen-done", "2026-03-09T10:00:00.000Z"],
+      ["old-unseen-done", "2026-03-07T08:00:00.000Z"],
     ]);
 
     const groups = groupWorkingOverviewThreads({
@@ -47,6 +49,10 @@ describe("groupWorkingOverviewThreads", () => {
         thread("approval", { runtime: runtime("running"), hasPendingApprovals: true }),
         thread("unseen-done", { runtime: runtime("idle"), latestRun: completedRun }),
         thread("seen-done", { runtime: runtime("idle"), latestRun: completedRun }),
+        thread("old-unseen-done", {
+          runtime: runtime("idle"),
+          latestRun: { ...completedRun, completedAt: "2026-03-07T09:05:00.000Z" },
+        }),
         thread("old-done", {
           runtime: runtime("idle"),
           latestRun: { ...completedRun, completedAt: "2026-03-07T09:05:00.000Z" },
@@ -73,8 +79,9 @@ describe("groupWorkingOverviewThreads", () => {
     );
   });
 
-  it("nests subagents under their parent with their own status", () => {
+  it("nests subagents and delegated tasks under their parent with their own status", () => {
     const parentId = ThreadId.make("parent");
+    const remote = EnvironmentId.make("environment-remote");
     const subagentLineage = {
       rootThreadId: parentId,
       parentThreadId: parentId,
@@ -85,8 +92,19 @@ describe("groupWorkingOverviewThreads", () => {
         thread("parent", { runtime: runtime("running") }),
         thread("explorer", { runtime: runtime("running"), lineage: subagentLineage }),
         thread("reviewer", { runtime: runtime("idle"), lineage: subagentLineage }),
+        thread("remote-task", {
+          environmentId: remote,
+          runtime: runtime("running"),
+          delegatedFrom: {
+            environmentId: EnvironmentId.make("environment-test"),
+            threadId: parentId,
+            title: "parent",
+          },
+        }),
       ],
-      delegatedUnderParent: new Set(),
+      delegatedUnderParent: new Set([
+        threadKey({ environmentId: remote, threadId: ThreadId.make("remote-task") }),
+      ]),
       disconnectedEnvironmentIds: new Set(),
       lastVisitedAt: () => undefined,
       nowMs: NOW_MS,
@@ -97,6 +115,7 @@ describe("groupWorkingOverviewThreads", () => {
       groups.working[0]?.children.map((child) => [child.thread.id, child.status?.label ?? null]),
     ).toEqual([
       ["explorer", "Working"],
+      ["remote-task", "Working"],
       ["reviewer", null],
     ]);
   });
@@ -138,7 +157,7 @@ describe("groupEntriesByProject", () => {
 });
 
 describe("collectWorkingPullRequests", () => {
-  it("lists each open pull request once, with live threads first", () => {
+  it("lists each open pull request once, including subagents', with live threads first", () => {
     const link = (number: number, state: "open" | "merged", updatedAt: string) => ({
       number,
       url: `https://github.com/acme/web/pull/${number}`,
@@ -153,14 +172,31 @@ describe("collectWorkingPullRequests", () => {
       },
       stack: null,
     });
-    const entry = (id: string, pullRequests: ReadonlyArray<ReturnType<typeof link>>) => ({
+    const working = { label: "Working" as const, colorClass: "", dotClass: "", pulse: false };
+    const entry = (
+      id: string,
+      pullRequests: ReadonlyArray<ReturnType<typeof link>>,
+      children: ReadonlyArray<{
+        id: string;
+        pullRequests: ReadonlyArray<ReturnType<typeof link>>;
+      }> = [],
+    ) => ({
       thread: thread(id, { pullRequests: pullRequests as never }),
-      status: { label: "Working" as const, colorClass: "", dotClass: "", pulse: false },
-      children: [],
+      status: working,
+      children: children.map((child) => ({
+        thread: thread(child.id, { pullRequests: child.pullRequests as never }),
+        status: working,
+      })),
     });
     const pullRequests = collectWorkingPullRequests({
       "needs-you": [],
-      working: [entry("live", [link(2, "open", "2026-03-09T08:00:00.000Z")])],
+      working: [
+        entry(
+          "live",
+          [link(2, "open", "2026-03-09T08:00:00.000Z")],
+          [{ id: "live-subagent", pullRequests: [link(4, "open", "2026-03-09T07:00:00.000Z")] }],
+        ),
+      ],
       completed: [
         entry("done", [
           link(1, "open", "2026-03-09T11:00:00.000Z"),
@@ -178,6 +214,7 @@ describe("collectWorkingPullRequests", () => {
       ]),
     ).toEqual([
       [2, "live", true],
+      [4, "live-subagent", true],
       [1, "done", false],
     ]);
   });

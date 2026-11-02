@@ -1,3 +1,4 @@
+import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { sortWorkingThreadsBySend } from "@t3tools/client-runtime/state/thread-inbox";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import {
@@ -82,6 +83,7 @@ type WorkingOverviewThreadInput = Pick<
   | "interactionMode"
   | "pendingBackgroundTasks"
   | "blockedOnThreadWait"
+  | "delegatedFrom"
 >;
 
 /**
@@ -99,14 +101,12 @@ export function groupWorkingOverviewThreads<T extends WorkingOverviewThreadInput
     resolveThreadStatusPill({ thread: { ...thread, lastVisitedAt: input.lastVisitedAt(thread) } });
   const childrenByParent = new Map<string, Array<WorkingOverviewEntry<T>["children"][number]>>();
   for (const thread of sortWorkingThreadsBySend(input.threads)) {
-    const parentId = thread.lineage.parentThreadId;
-    if (parentId === null || isListedThreadLineage(thread.lineage) || thread.archivedAt !== null) {
-      continue;
-    }
-    const key = `${thread.environmentId}:${parentId}`;
-    const children = childrenByParent.get(key) ?? [];
+    if (thread.archivedAt !== null) continue;
+    const parentKey = parentKeyOf(thread, input.delegatedUnderParent);
+    if (parentKey === null) continue;
+    const children = childrenByParent.get(parentKey) ?? [];
     children.push({ thread, status: statusOf(thread) });
-    childrenByParent.set(key, children);
+    childrenByParent.set(parentKey, children);
   }
 
   const sections: Record<WorkingOverviewSectionId, Array<WorkingOverviewEntry<T>>> = {
@@ -118,23 +118,44 @@ export function groupWorkingOverviewThreads<T extends WorkingOverviewThreadInput
   const completedAt = (thread: T) => Date.parse(thread.latestRun?.completedAt ?? "");
   for (const thread of sortWorkingThreadsBySend(visible)) {
     if (input.disconnectedEnvironmentIds.has(thread.environmentId)) continue;
-    const status =
-      statusOf(thread) ??
-      (thread.latestRun?.status === "completed" &&
-      input.nowMs - completedAt(thread) <= COMPLETED_WINDOW_MS
-        ? SEEN_COMPLETION_STATUS
-        : null);
+    const status = statusOf(thread) ?? SEEN_COMPLETION_STATUS;
+    // Completions stay a day, seen or not; anything else idle and seen is left out.
+    const recentCompletion =
+      thread.latestRun?.status === "completed" &&
+      input.nowMs - completedAt(thread) <= COMPLETED_WINDOW_MS;
+    if (status.label === "Completed" && !recentCompletion) continue;
     if (status === null) continue;
     sections[SECTION_BY_STATUS[status.label]].push({
       thread,
       status,
-      children: childrenByParent.get(`${thread.environmentId}:${thread.id}`) ?? [],
+      children: childrenByParent.get(threadKey(scopeThread(thread))) ?? [],
     });
   }
   sections.completed = sections.completed
     .toSorted((left, right) => completedAt(right.thread) - completedAt(left.thread))
     .slice(0, MAX_COMPLETED);
   return sections;
+}
+
+/**
+ * The thread this one shows under, matching the sidebar: subagents and side chats under
+ * their local parent, and delegated tasks under their listed parent in another environment.
+ */
+function parentKeyOf(
+  thread: Pick<EnvironmentThreadShell, "environmentId" | "id" | "lineage" | "delegatedFrom">,
+  delegatedUnderParent: ReadonlySet<string>,
+): string | null {
+  const parent = thread.delegatedFrom;
+  if (parent != null && delegatedUnderParent.has(threadKey(scopeThread(thread)))) {
+    return threadKey({ environmentId: parent.environmentId, threadId: parent.threadId });
+  }
+  const parentId = thread.lineage.parentThreadId;
+  if (parentId === null || isListedThreadLineage(thread.lineage)) return null;
+  return threadKey({ environmentId: thread.environmentId, threadId: parentId });
+}
+
+function scopeThread(thread: Pick<EnvironmentThreadShell, "environmentId" | "id">) {
+  return { environmentId: thread.environmentId, threadId: thread.id };
 }
 
 interface ProjectGroupInput {
@@ -199,17 +220,21 @@ export function collectWorkingPullRequests<
 >(sections: WorkingOverviewSections<T>): Array<WorkingPullRequest<T>> {
   const byUrl = new Map<string, WorkingPullRequest<T>>();
   for (const section of ["needs-you", "working", "completed"] as const) {
-    for (const { thread, status } of sections[section]) {
-      for (const link of thread.pullRequests) {
-        if (link.snapshot === null || link.snapshot.state !== "open" || byUrl.has(link.url)) {
-          continue;
+    for (const entry of sections[section]) {
+      const owners = [entry, ...entry.children.filter((child) => child.status !== null)];
+      for (const { thread, status } of owners) {
+        if (status === null) continue;
+        for (const link of thread.pullRequests) {
+          if (link.snapshot === null || link.snapshot.state !== "open" || byUrl.has(link.url)) {
+            continue;
+          }
+          byUrl.set(link.url, {
+            link: { ...link, snapshot: link.snapshot },
+            thread,
+            status,
+            active: section !== "completed",
+          });
         }
-        byUrl.set(link.url, {
-          link: { ...link, snapshot: link.snapshot },
-          thread,
-          status,
-          active: section !== "completed",
-        });
       }
     }
   }
