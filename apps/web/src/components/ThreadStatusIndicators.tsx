@@ -161,16 +161,21 @@ export interface ThreadPullRequestBadgePresentation {
   readonly text: string | number;
 }
 
+/** `compact` fits the sidebar; `full` names the current number for wider rows. */
+export type ThreadPullRequestBadgeText = "compact" | "full";
+
 function resolveThreadPullRequestBadgePresentation({
   badge,
   number,
   url,
   status,
+  text = "compact",
 }: {
   readonly badge: ThreadPullRequestBadge | null;
   readonly number?: number | undefined;
   readonly url?: string | undefined;
   readonly status: PrStatusIndicator | null;
+  readonly text?: ThreadPullRequestBadgeText | undefined;
 }): ThreadPullRequestBadgePresentation | null {
   const terminology = changeRequestTerminologyForUrl(url);
   if (badge?.kind === "stack") {
@@ -179,7 +184,7 @@ function resolveThreadPullRequestBadgePresentation({
       Icon: PullRequestGlyph.stack,
       toneClassName: aggregate.toneClassName,
       label: `Stack of ${badge.layers} ${terminology.plural}, ${aggregate.label.toLowerCase()}`,
-      text: badge.layers,
+      text: text === "full" ? `${badge.layers} stacked` : badge.layers,
     };
   }
   if (number === undefined || url === undefined) return null;
@@ -191,14 +196,14 @@ function resolveThreadPullRequestBadgePresentation({
       Icon: aggregate.Icon,
       toneClassName: aggregate.toneClassName,
       label: `${tooltip}, and ${badge.others} more linked; overall ${aggregate.label.toLowerCase()}`,
-      text: `+${badge.others + 1}`,
+      text: text === "full" ? `#${number} +${badge.others}` : `+${badge.others + 1}`,
     };
   }
   return {
     Icon: status?.Icon ?? PullRequestGlyph.pullRequest,
     toneClassName: status?.colorClass ?? "text-muted-foreground",
     label: tooltip,
-    text: number,
+    text: text === "full" ? `#${number}` : number,
   };
 }
 
@@ -211,6 +216,7 @@ export function ThreadPullRequestBadgeControl({
   status,
   onOpenList,
   onOpenPullRequest,
+  text,
 }: {
   render: ReactElement<{ render?: useRender.RenderProp }>;
   badge: ThreadPullRequestBadge | null;
@@ -220,8 +226,15 @@ export function ThreadPullRequestBadgeControl({
   status: PrStatusIndicator | null;
   onOpenList: () => void;
   onOpenPullRequest: (event: MouseEvent<HTMLElement>, url?: string) => void;
+  text?: ThreadPullRequestBadgeText | undefined;
 }) {
-  const presentation = resolveThreadPullRequestBadgePresentation({ badge, number, url, status });
+  const presentation = resolveThreadPullRequestBadgePresentation({
+    badge,
+    number,
+    url,
+    status,
+    text,
+  });
   if (presentation === null) return null;
   return (
     <PullRequestBadge

@@ -173,15 +173,18 @@ function RowPullRequestBadge({ thread }: { thread: SidebarThreadSummary }) {
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const openPrLink = useOpenPrLink();
   const supportsMultiple = useSupportsMultiplePullRequests(thread.environmentId);
-  const current = resolveThreadCurrentPullRequestLink(thread.pullRequests);
+  const link = resolveThreadCurrentPullRequestLink(thread.pullRequests);
+  // Threads from older servers, or with only a branch PR, carry a number and URL but no link.
+  const current = link ?? thread.linkedPullRequest ?? thread.branchPullRequest ?? null;
   if (current === null) return null;
-  const snapshot = linkedPullRequestSnapshotStatus(current);
+  const snapshot = link === null ? null : linkedPullRequestSnapshotStatus(link);
   const openThread = () =>
     void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(threadRef) });
   return (
     <span className="pointer-events-auto relative shrink-0">
       <ThreadPullRequestBadgeControl
         render={<InlineButton />}
+        text="full"
         badge={supportsMultiple ? resolveThreadPullRequestBadge(thread.pullRequests) : null}
         pullRequests={thread.pullRequests}
         number={current.number}
