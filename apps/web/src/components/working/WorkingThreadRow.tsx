@@ -1,12 +1,18 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { resolveThreadProviderStack } from "@t3tools/client-runtime/state/models";
-import { resolveThreadCurrentPullRequestLink } from "@t3tools/client-runtime/thread-pull-requests";
+import {
+  resolveThreadCurrentPullRequestLink,
+  resolveThreadPullRequestBadge,
+} from "@t3tools/client-runtime/thread-pull-requests";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { GitBranchIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type MouseEvent } from "react";
 
+import { useSupportsMultiplePullRequests } from "../../hooks/useSupportsMultiplePullRequests";
+import { useOpenPrLink } from "../../lib/openPullRequestLink";
 import { cn } from "../../lib/utils";
+import { useRightPanelStore } from "../../rightPanelStore";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { environmentThreadDetails } from "../../state/threads";
 import { buildThreadRouteParams } from "../../threadRoutes";
@@ -16,6 +22,12 @@ import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import type { SidebarProviderEntry } from "../sidebar/SidebarThreadRow";
 import { resolveWorkingStartedAt } from "../Sidebar.logic";
 import {
+  linkedPullRequestSnapshotStatus,
+  prStatusIndicator,
+  ThreadPullRequestBadgeControl,
+} from "../ThreadStatusIndicators";
+import { InlineButton } from "../ui/button";
+import {
   latestActivityLine,
   type WorkingOverviewEntry,
   type WorkingOverviewStatus,
@@ -23,6 +35,9 @@ import {
 
 /** Live rows re-read their thread's stream this often, not on every token. */
 const LIVE_ACTIVITY_INTERVAL_MS = 5_000;
+
+/** Past this many, a row points to the thread for the rest of its subagents. */
+const MAX_SUBAGENT_ROWS = 4;
 
 const ROW_LINK_CLASS =
   "rounded-md outline-none hover:bg-accent/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring";
@@ -38,17 +53,17 @@ export function WorkingThreadRow({
   projectName: string | null;
   providerEntries: ReadonlyMap<string, SidebarProviderEntry> | undefined;
   nowMs: number;
-  /** Subscribes to the thread's stream to show its latest step. */
+  /** Subscribes to the thread's stream to show the agent's latest message. */
   live: boolean;
 }) {
   const { thread, status, children } = entry;
+  const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const activity = useLiveActivityLine(thread.environmentId, thread.id, live);
   const provider = providerEntries?.get(resolveThreadProviderStack(thread).at(-1) ?? "") ?? null;
   const modelName =
     provider?.models.find((model) => model.slug === thread.modelSelection.model)?.name ??
     thread.modelSelection.model;
-  const pullRequest = resolveThreadCurrentPullRequestLink(thread.pullRequests);
-  const activeChildren = children.filter((child) => child.status !== null).length;
+  const activeChildren = children.filter((child) => child.status?.label !== "Completed").length;
   const detail =
     status.label === "Failed"
       ? thread.runtime?.lastError
@@ -56,10 +71,8 @@ export function WorkingThreadRow({
   const facts = [
     projectName,
     provider === null ? modelName : `${provider.displayName} · ${modelName}`,
-    children.length > 0
-      ? `${children.length} ${children.length === 1 ? "subagent" : "subagents"}${
-          activeChildren > 0 ? `, ${activeChildren} active` : ""
-        }`
+    activeChildren > 0
+      ? `${activeChildren} ${activeChildren === 1 ? "subagent" : "subagents"} active`
       : null,
     thread.pendingBackgroundTasks.length > 0
       ? `${thread.pendingBackgroundTasks.length} background ${
@@ -67,18 +80,20 @@ export function WorkingThreadRow({
         }`
       : null,
   ].filter((fact): fact is string => fact !== null);
+  const shownChildren = children.slice(0, MAX_SUBAGENT_ROWS);
+  const hiddenChildren = children.length - shownChildren.length;
 
   return (
     <li className="min-w-0">
-      <Link
-        to="/$environmentId/$threadId"
-        params={buildThreadRouteParams(scopeThreadRef(thread.environmentId, thread.id))}
-        className={cn(
-          "grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-x-2.5 px-2 py-1",
-          ROW_LINK_CLASS,
-        )}
-      >
-        <span className="flex h-5 items-center">
+      {/* The link fills the row so the PR badge above it can stay its own control. */}
+      <div className="relative grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-x-2.5 rounded-md px-2 py-1 has-[>a:hover]:bg-accent/60">
+        <Link
+          to="/$environmentId/$threadId"
+          params={buildThreadRouteParams(threadRef)}
+          aria-label={thread.title}
+          className="absolute inset-0 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        />
+        <span className="pointer-events-none flex h-5 items-center">
           {provider === null ? null : (
             <ProviderInstanceIcon
               driverKind={provider.driverKind}
@@ -90,7 +105,7 @@ export function WorkingThreadRow({
             />
           )}
         </span>
-        <span className="flex min-w-0 flex-col">
+        <span className="pointer-events-none flex min-w-0 flex-col">
           <span className="truncate text-sm leading-5 font-medium">{thread.title}</span>
           <span className="flex min-w-0 items-center gap-x-2 text-xs leading-4 text-muted-foreground">
             <span className="truncate">{facts.join(" · ")}</span>
@@ -100,16 +115,14 @@ export function WorkingThreadRow({
                 <span className="truncate font-mono">{thread.branch}</span>
               </span>
             )}
-            {pullRequest === null ? null : (
-              <span className="shrink-0 tabular-nums">#{pullRequest.number}</span>
-            )}
+            <RowPullRequestBadge thread={thread} />
           </span>
           {detail ? (
             <span
               className={cn(
                 "truncate text-xs leading-4",
                 activity !== null && detail === activity
-                  ? "font-mono text-foreground/70"
+                  ? "text-foreground/75"
                   : "text-muted-foreground/80",
               )}
             >
@@ -117,16 +130,16 @@ export function WorkingThreadRow({
             </span>
           ) : null}
         </span>
-        <span className="flex flex-col items-end text-xs leading-5 whitespace-nowrap">
+        <span className="pointer-events-none flex flex-col items-end text-xs leading-5 whitespace-nowrap">
           <StatusLabel status={status} />
           <span className="leading-4 text-muted-foreground tabular-nums">
             {rowTiming(thread, status, nowMs)}
           </span>
         </span>
-      </Link>
-      {children.length > 0 ? (
+      </div>
+      {shownChildren.length > 0 ? (
         <ul className="ms-[1.125rem] flex flex-col border-s ps-2">
-          {children.map((child) => (
+          {shownChildren.map((child) => (
             <li key={`${child.thread.environmentId}:${child.thread.id}`} className="min-w-0">
               <Link
                 to="/$environmentId/$threadId"
@@ -139,17 +152,52 @@ export function WorkingThreadRow({
                 )}
               >
                 <span className="truncate text-foreground/90">{child.thread.title}</span>
-                {child.status === null ? (
-                  <span className="text-muted-foreground">Idle</span>
-                ) : (
-                  <StatusLabel status={child.status} />
-                )}
+                {child.status === null ? null : <StatusLabel status={child.status} />}
               </Link>
             </li>
           ))}
+          {hiddenChildren > 0 ? (
+            <li className="px-2 py-0.5 text-xs text-muted-foreground">
+              {hiddenChildren} more in the thread
+            </li>
+          ) : null}
         </ul>
       ) : null}
     </li>
+  );
+}
+
+/** The sidebar's PR badge: one PR opens directly, several open a list to pick from. */
+function RowPullRequestBadge({ thread }: { thread: SidebarThreadSummary }) {
+  const navigate = useNavigate();
+  const threadRef = scopeThreadRef(thread.environmentId, thread.id);
+  const openPrLink = useOpenPrLink();
+  const supportsMultiple = useSupportsMultiplePullRequests(thread.environmentId);
+  const current = resolveThreadCurrentPullRequestLink(thread.pullRequests);
+  if (current === null) return null;
+  const snapshot = linkedPullRequestSnapshotStatus(current);
+  const openThread = () =>
+    void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(threadRef) });
+  return (
+    <span className="pointer-events-auto relative shrink-0">
+      <ThreadPullRequestBadgeControl
+        render={<InlineButton />}
+        badge={supportsMultiple ? resolveThreadPullRequestBadge(thread.pullRequests) : null}
+        pullRequests={thread.pullRequests}
+        number={current.number}
+        url={current.url}
+        status={prStatusIndicator(snapshot?.pr ?? null, snapshot?.sourceControlProvider)}
+        onOpenList={() => {
+          useRightPanelStore.getState().open(threadRef, "pull-requests");
+          openThread();
+        }}
+        onOpenPullRequest={(event: MouseEvent<HTMLElement>, url?: string) => {
+          if (openPrLink(event, url ?? current.url, url === undefined ? undefined : threadRef)) {
+            openThread();
+          }
+        }}
+      />
+    </span>
   );
 }
 

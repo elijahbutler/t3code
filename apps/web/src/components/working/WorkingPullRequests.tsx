@@ -2,6 +2,7 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { Link } from "@tanstack/react-router";
 
 import { cn } from "../../lib/utils";
+import { CollapsibleSectionHeader } from "../ui/collapsible-section-header";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import type { SidebarThreadSummary } from "../../types";
 import { readPullRequestListPreferences } from "../pullRequest/pullRequestListPreferences";
@@ -11,28 +12,36 @@ import type { WorkingPullRequest } from "./workingOverview.logic";
 /** Open pull requests linked to the page's threads; ones with a live thread come first. */
 export function WorkingPullRequests({
   pullRequests,
+  expanded,
+  onToggle,
   className,
 }: {
   pullRequests: ReadonlyArray<WorkingPullRequest<SidebarThreadSummary>>;
+  expanded: boolean;
+  onToggle: () => void;
   className?: string;
 }) {
   return (
-    <section aria-labelledby="working-pull-requests" className={cn("min-w-0", className)}>
-      <h2
-        id="working-pull-requests"
-        className="flex items-center gap-2 px-2 pb-1 text-xs font-medium text-muted-foreground"
-      >
-        Pull requests
-        <span className="font-normal tabular-nums">{pullRequests.length}</span>
+    <section aria-label="Pull requests" className={cn("min-w-0", className)}>
+      <div className="flex items-center">
+        <div className="min-w-0 flex-1">
+          <CollapsibleSectionHeader
+            expanded={expanded}
+            onClick={onToggle}
+            accessory={<span className="font-normal tabular-nums">{pullRequests.length}</span>}
+          >
+            Pull requests
+          </CollapsibleSectionHeader>
+        </div>
         <Link
           to="/pull-requests"
           search={readPullRequestListPreferences()}
-          className="ms-auto rounded-sm font-normal outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+          className="shrink-0 rounded-sm px-2 text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         >
           All
         </Link>
-      </h2>
-      {pullRequests.length === 0 ? (
+      </div>
+      {!expanded ? null : pullRequests.length === 0 ? (
         <p className="px-2 py-1 text-xs text-muted-foreground">
           No open pull requests on these threads.
         </p>
@@ -53,9 +62,9 @@ export function WorkingPullRequests({
                     className={cn("mt-0.5 size-4", state.toneClassName)}
                   />
                   <span className="flex min-w-0 flex-col">
-                    <span className="flex min-w-0 items-baseline gap-1.5 text-sm leading-5">
-                      <span className="truncate">{link.snapshot.title}</span>
-                      <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+                    <span className="line-clamp-2 text-sm leading-5 break-words">
+                      {link.snapshot.title}
+                      <span className="ms-1.5 text-xs text-muted-foreground tabular-nums">
                         #{link.number}
                       </span>
                     </span>

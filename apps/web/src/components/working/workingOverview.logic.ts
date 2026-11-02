@@ -32,6 +32,8 @@ export const WORKING_OVERVIEW_SECTIONS: ReadonlyArray<{
  */
 const SETTLED_WINDOW_MS = 24 * 60 * 60 * 1000;
 const MAX_ROWS_PER_FINISHED_SECTION = 30;
+/** A finished subagent stays listed this long, or until its parent is next opened. */
+const RECENT_SUBAGENT_MS = 60 * 60 * 1000;
 
 export interface WorkingOverviewStatus extends Omit<ThreadStatusPill, "label"> {
   readonly label: ThreadStatusPill["label"] | "Settled";
@@ -55,7 +57,7 @@ const SETTLED_STATUS: WorkingOverviewStatus = {
 export interface WorkingOverviewEntry<T> {
   readonly thread: T;
   readonly status: WorkingOverviewStatus;
-  /** Subagents and side chats of this thread. Idle ones have no status. */
+  /** Active subagents and side chats of this thread, and ones that finished recently. */
   readonly children: ReadonlyArray<{
     readonly thread: T;
     readonly status: WorkingOverviewStatus | null;
@@ -138,23 +140,33 @@ export function groupWorkingOverviewThreads<T extends WorkingOverviewThreadInput
   for (const thread of sortWorkingThreadsBySend(visible)) {
     if (input.disconnectedEnvironmentIds.has(thread.environmentId)) continue;
     const pill = statusOf(thread);
-    const live = pill !== null && SECTION_BY_STATUS[pill.label] !== "completed";
+    // Settled wins, as in the sidebar; new activity un-settles a thread on the server.
     const placement: { section: WorkingOverviewSectionId; status: WorkingOverviewStatus } | null =
-      live
-        ? { section: SECTION_BY_STATUS[pill.label], status: pill }
-        : thread.settledOverride === "settled"
-          ? input.nowMs - timestampMs(thread.settledAt) <= SETTLED_WINDOW_MS
-            ? { section: "settled", status: SETTLED_STATUS }
-            : null
+      thread.settledOverride === "settled"
+        ? input.nowMs - timestampMs(thread.settledAt) <= SETTLED_WINDOW_MS
+          ? { section: "settled", status: SETTLED_STATUS }
+          : null
+        : pill !== null
+          ? { section: SECTION_BY_STATUS[pill.label], status: pill }
           : thread.latestRun?.status === "completed"
-            ? { section: "completed", status: pill ?? SEEN_COMPLETION_STATUS }
+            ? { section: "completed", status: SEEN_COMPLETION_STATUS }
             : null;
     if (placement === null) continue;
-    sections[placement.section].push({
-      thread,
-      status: placement.status,
-      children: childrenByParent.get(threadKey(scopeThread(thread))) ?? [],
-    });
+    // Idle subagents are noise here; finished ones stay while they are news.
+    const newsSince = Math.min(
+      input.nowMs - RECENT_SUBAGENT_MS,
+      timestampMs(input.lastVisitedAt(thread)) || Infinity,
+    );
+    const children = (childrenByParent.get(threadKey(scopeThread(thread))) ?? []).flatMap(
+      (child) => {
+        if (child.status !== null && child.status.label !== "Completed") return [child];
+        const finishedAt = timestampMs(child.thread.latestRun?.completedAt);
+        return child.thread.latestRun?.status === "completed" && finishedAt > newsSince
+          ? [{ thread: child.thread, status: child.status ?? SEEN_COMPLETION_STATUS }]
+          : [];
+      },
+    );
+    sections[placement.section].push({ thread, status: placement.status, children });
   }
   sections.completed = sections.completed
     .toSorted(
@@ -289,34 +301,19 @@ function lastLine(text: string): string | null {
   return line.length > ACTIVITY_MAX_LENGTH ? `…${line.slice(-ACTIVITY_MAX_LENGTH)}` : line;
 }
 
-/** One line describing the most recent thing the agent did or said in this thread. */
+/** The last line of the agent's newest message. Tool calls and thinking are left out. */
 export function latestActivityLine(
   projection: Pick<OrchestrationV2ThreadProjection, "turnItems">,
 ): string | null {
-  const items = projection.turnItems.toSorted((left, right) => right.ordinal - left.ordinal);
-  for (const item of items) {
-    const line = (() => {
-      switch (item.type) {
-        case "assistant_message":
-          return lastLine(item.text);
-        case "reasoning": {
-          const text = lastLine(item.text);
-          return text === null ? null : `Thinking: ${text}`;
-        }
-        case "command_execution": {
-          const command = lastLine(item.input);
-          return command === null ? null : `$ ${command}`;
-        }
-        case "file_change":
-          return `Edited ${item.fileName}`;
-        case "file_search":
-          return item.pattern ? `Searched files for ${item.pattern}` : null;
-        case "web_search":
-          return item.patterns?.[0] ? `Searched the web for ${item.patterns[0]}` : null;
-        default:
-          return null;
-      }
-    })();
+  type Item = OrchestrationV2ThreadProjection["turnItems"][number];
+  const messages = projection.turnItems
+    .filter(
+      (item): item is Extract<Item, { type: "assistant_message" }> =>
+        item.type === "assistant_message",
+    )
+    .toSorted((left, right) => right.ordinal - left.ordinal);
+  for (const message of messages) {
+    const line = lastLine(message.text);
     if (line !== null) return line;
   }
   return null;

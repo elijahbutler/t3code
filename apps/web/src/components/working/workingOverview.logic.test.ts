@@ -63,6 +63,12 @@ describe("groupWorkingOverviewThreads", () => {
           settledOverride: "settled",
           settledAt: "2026-03-09T11:00:00.000Z",
         }),
+        thread("settled-but-stuck-waiting", {
+          runtime: { ...runtime("running"), activeRunId: null },
+          blockedOnThreadWait: true,
+          settledOverride: "settled",
+          settledAt: "2026-03-09T10:30:00.000Z",
+        }),
         thread("settled-last-week", {
           runtime: runtime("idle"),
           latestRun: completedRun,
@@ -85,14 +91,14 @@ describe("groupWorkingOverviewThreads", () => {
     expect(ids("needs-you")).toEqual(["approval"]);
     expect(ids("working")).toEqual(["running"]);
     expect(ids("completed")).toEqual(["seen-done", "unseen-done", "old-done", "old-unseen-done"]);
-    expect(ids("settled")).toEqual(["settled-today"]);
+    expect(ids("settled")).toEqual(["settled-today", "settled-but-stuck-waiting"]);
     expect(groups["needs-you"][0]?.status.label).toBe("Pending Approval");
     expect(groups.completed.find((entry) => entry.thread.id === "seen-done")?.status).toBe(
       SEEN_COMPLETION_STATUS,
     );
   });
 
-  it("nests subagents and delegated tasks under their parent with their own status", () => {
+  it("nests active and recently finished subagents and delegated tasks, hiding idle ones", () => {
     const parentId = ThreadId.make("parent");
     const remote = EnvironmentId.make("environment-remote");
     const subagentLineage = {
@@ -105,6 +111,16 @@ describe("groupWorkingOverviewThreads", () => {
         thread("parent", { runtime: runtime("running") }),
         thread("explorer", { runtime: runtime("running"), lineage: subagentLineage }),
         thread("reviewer", { runtime: runtime("idle"), lineage: subagentLineage }),
+        thread("finished-recently", {
+          runtime: runtime("idle"),
+          lineage: subagentLineage,
+          latestRun: { ...completedRun, completedAt: "2026-03-09T11:30:00.000Z" },
+        }),
+        thread("finished-earlier", {
+          runtime: runtime("idle"),
+          lineage: subagentLineage,
+          latestRun: { ...completedRun, completedAt: "2026-03-09T09:00:00.000Z" },
+        }),
         thread("remote-task", {
           environmentId: remote,
           runtime: runtime("running"),
@@ -127,9 +143,9 @@ describe("groupWorkingOverviewThreads", () => {
     expect(
       groups.working[0]?.children.map((child) => [child.thread.id, child.status?.label ?? null]),
     ).toEqual([
+      ["finished-recently", "Completed"],
       ["explorer", "Working"],
       ["remote-task", "Working"],
-      ["reviewer", null],
     ]);
   });
 });
@@ -238,26 +254,18 @@ describe("latestActivityLine", () => {
   const item = (ordinal: number, fields: Record<string, unknown>) =>
     ({ ordinal, ...fields }) as never;
 
-  it("describes the newest item the user would recognize", () => {
-    expect(
-      latestActivityLine({
-        turnItems: [
-          item(1, {
-            type: "assistant_message",
-            text: "Looking at the tests.\n\nFound two failures.",
-          }),
-          item(3, { type: "todo_list" }),
-          item(2, { type: "command_execution", input: "vp test run src/cart.test.ts" }),
-        ],
-      }),
-    ).toBe("$ vp test run src/cart.test.ts");
+  it("shows the last line of the agent's newest message and skips tool calls", () => {
     expect(
       latestActivityLine({
         turnItems: [
           item(1, { type: "assistant_message", text: "Looking.\n\nFound two failures.\n" }),
+          item(3, { type: "command_execution", input: "vp test run src/cart.test.ts" }),
+          item(2, { type: "reasoning", text: "Maybe the fixture is stale." }),
         ],
       }),
     ).toBe("Found two failures.");
-    expect(latestActivityLine({ turnItems: [item(1, { type: "todo_list" })] })).toBeNull();
+    expect(
+      latestActivityLine({ turnItems: [item(1, { type: "command_execution", input: "ls" })] }),
+    ).toBeNull();
   });
 });

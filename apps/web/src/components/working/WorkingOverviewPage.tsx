@@ -1,9 +1,11 @@
 import { useAtomValue } from "@effect/atom-react";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import * as Schema from "effect/Schema";
 import { FolderIcon } from "lucide-react";
 
 import { isElectron } from "~/env";
 import { useNowMinute } from "../../hooks/useNowMinute";
+import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { useBoringSidebarEnabled } from "../../hooks/useSettings";
 import { useSidebarProjectGroups } from "../../hooks/useSidebarProjectGroups";
 import { workspaceAreaProps } from "../../lib/workspaceFocus";
@@ -13,6 +15,7 @@ import { liveShellEnvironmentIdsAtom } from "../../state/shell";
 import { sidebarProviderEntriesAtom } from "../../state/sidebarProviderEntries";
 import { useUiStateStore } from "../../uiStateStore";
 import { isSidebarEnvironmentDisconnected, resolveThreadLastVisitedAt } from "../Sidebar.logic";
+import { CollapsibleSectionHeader } from "../ui/collapsible-section-header";
 import { SidebarInset } from "../ui/sidebar";
 import { WorkspaceBreadcrumb, WorkspaceBreadcrumbItem } from "../WorkspaceBreadcrumb";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
@@ -32,6 +35,10 @@ import { WorkingUsageStrip } from "./WorkingUsageStrip";
  */
 const MAX_LIVE_ROWS = 6;
 
+const COLLAPSED_SECTIONS_KEY = "t3code:working-overview:collapsed-sections";
+const EMPTY_COLLAPSED: ReadonlyArray<string> = [];
+const COLLAPSED_SECTIONS_SCHEMA = Schema.Array(Schema.String);
+
 export function WorkingOverviewPage() {
   const threads = useQuietThreadShells();
   const projectGroups = useSidebarProjectGroups();
@@ -43,6 +50,15 @@ export function WorkingOverviewPage() {
   const liveShellEnvironmentIds = useAtomValue(liveShellEnvironmentIdsAtom);
   // Minute ticks keep elapsed labels current without repainting every second.
   const nowMs = Date.parse(`${useNowMinute()}:00.000Z`);
+  const [collapsed, setCollapsed] = useLocalStorage(
+    COLLAPSED_SECTIONS_KEY,
+    EMPTY_COLLAPSED,
+    COLLAPSED_SECTIONS_SCHEMA,
+  );
+  const toggleSection = (id: string) =>
+    setCollapsed((current) =>
+      current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id],
+    );
 
   const disconnectedEnvironmentIds = new Set<string>(
     environmentConnections
@@ -98,7 +114,7 @@ export function WorkingOverviewPage() {
         </WorkspacePageHeader>
 
         <div className="topbar-scroll-fade scrollbar-gutter-both min-h-0 flex-1 overflow-y-auto">
-          <div className="grid grid-cols-1 gap-x-4 gap-y-4 px-2 pt-1 pb-4 @4xl/working:grid-cols-[minmax(0,1fr)_minmax(16rem,22rem)]">
+          <div className="grid grid-cols-1 gap-x-4 gap-y-4 px-2 pt-6 pb-4 @4xl/working:grid-cols-[minmax(0,1fr)_minmax(16rem,22rem)]">
             <div className="flex min-w-0 flex-col gap-3">
               {total === 0 ? (
                 <p className="px-2 py-10 text-center text-sm text-muted-foreground">
@@ -112,50 +128,60 @@ export function WorkingOverviewPage() {
                     ? groupEntriesByProject(entries, projectGroups)
                     : [{ key: "all", name: null, entries }];
                   return (
-                    <section key={section.id} aria-labelledby={`working-${section.id}`}>
-                      <h2
-                        id={`working-${section.id}`}
-                        className="flex items-center gap-2 px-2 pb-0.5 text-xs font-medium text-muted-foreground"
+                    <section key={section.id} aria-label={section.title}>
+                      <CollapsibleSectionHeader
+                        expanded={!collapsed.includes(section.id)}
+                        onClick={() => toggleSection(section.id)}
+                        accessory={
+                          <span className="font-normal tabular-nums">
+                            {section.id === "settled"
+                              ? `${entries.length} · last 24 hours`
+                              : entries.length}
+                          </span>
+                        }
                       >
                         {section.title}
-                        <span className="font-normal tabular-nums">{entries.length}</span>
-                        {section.id === "settled" ? (
-                          <span className="font-normal">· last 24 hours</span>
-                        ) : null}
-                      </h2>
-                      {groups.map((group) => (
-                        <div key={group.key}>
-                          {projectFolders ? (
-                            <h3 className="flex items-center gap-1.5 px-2 pt-1 text-xs text-foreground/80">
-                              <FolderIcon aria-hidden className="size-3.5 text-muted-foreground" />
-                              {group.name ?? "Other"}
-                            </h3>
-                          ) : null}
-                          <ul className="flex flex-col">
-                            {group.entries.map((entry) => {
-                              const key = `${entry.thread.environmentId}:${entry.thread.id}`;
-                              return (
-                                <WorkingThreadRow
-                                  key={key}
-                                  entry={entry}
-                                  projectName={
-                                    projectFolders
-                                      ? null
-                                      : (projectNames.get(
-                                          `${entry.thread.environmentId}:${entry.thread.projectId}`,
-                                        ) ?? null)
-                                  }
-                                  providerEntries={providerEntriesByEnvironment.get(
-                                    entry.thread.environmentId,
-                                  )}
-                                  nowMs={nowMs}
-                                  live={liveKeys.has(key)}
-                                />
-                              );
-                            })}
-                          </ul>
-                        </div>
-                      ))}
+                      </CollapsibleSectionHeader>
+                      {collapsed.includes(section.id) ? null : (
+                        <>
+                          {groups.map((group) => (
+                            <div key={group.key}>
+                              {projectFolders ? (
+                                <h3 className="flex items-center gap-1.5 px-2 pt-1 text-xs text-foreground/80">
+                                  <FolderIcon
+                                    aria-hidden
+                                    className="size-3.5 text-muted-foreground"
+                                  />
+                                  {group.name ?? "Other"}
+                                </h3>
+                              ) : null}
+                              <ul className="flex flex-col">
+                                {group.entries.map((entry) => {
+                                  const key = `${entry.thread.environmentId}:${entry.thread.id}`;
+                                  return (
+                                    <WorkingThreadRow
+                                      key={key}
+                                      entry={entry}
+                                      projectName={
+                                        projectFolders
+                                          ? null
+                                          : (projectNames.get(
+                                              `${entry.thread.environmentId}:${entry.thread.projectId}`,
+                                            ) ?? null)
+                                      }
+                                      providerEntries={providerEntriesByEnvironment.get(
+                                        entry.thread.environmentId,
+                                      )}
+                                      nowMs={nowMs}
+                                      live={liveKeys.has(key)}
+                                    />
+                                  );
+                                })}
+                              </ul>
+                            </div>
+                          ))}
+                        </>
+                      )}
                     </section>
                   );
                 })
@@ -163,6 +189,8 @@ export function WorkingOverviewPage() {
             </div>
             <WorkingPullRequests
               pullRequests={pullRequests}
+              expanded={!collapsed.includes("pull-requests")}
+              onToggle={() => toggleSection("pull-requests")}
               className="@4xl/working:border-s @4xl/working:ps-2"
             />
           </div>
