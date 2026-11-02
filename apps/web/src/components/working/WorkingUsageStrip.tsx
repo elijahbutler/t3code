@@ -104,77 +104,81 @@ export function WorkingUsageStrip({ nowMs }: { readonly nowMs: number }) {
           {unreadable ? "This connection can't read usage." : "Loading usage…"}
         </p>
       ) : (
-        <dl className="grid grid-cols-3 gap-x-4 gap-y-2 @2xl/working:grid-cols-6">
+        <dl className="flex flex-wrap gap-x-8 gap-y-2">
           {stats.map((stat) => (
             <div key={stat.label} className="min-w-0">
-              <dt className="truncate text-xs text-muted-foreground">{stat.label}</dt>
+              <dt className="text-xs text-muted-foreground">{stat.label}</dt>
               <dd className="text-base leading-6 font-medium tabular-nums">{stat.value}</dd>
             </div>
           ))}
         </dl>
       )}
-      <div className="flex flex-col gap-1.5 border-t pt-2">
-        {pools.length === 0 ? (
-          <p className="text-xs text-muted-foreground">No provider reports subscription limits.</p>
-        ) : (
-          pools.map(({ pool, windows: poolWindows }) => (
+      {pools.length === 0 ? (
+        <p className="border-t pt-2 text-xs text-muted-foreground">
+          No provider reports subscription limits.
+        </p>
+      ) : (
+        <div className="grid grid-cols-[minmax(0,6rem)_minmax(0,1fr)_minmax(0,1fr)] items-start gap-x-6 gap-y-2 border-t pt-2.5 text-xs">
+          {pools.map(({ pool, windows: poolWindows }) => (
             <PoolLimits key={pool.driver} pool={pool} windows={poolWindows} nowMs={nowMs} />
-          ))
-        )}
-      </div>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
 
+const LIMIT_KINDS = ["session", "weekly"] as const;
+
 /** The provider-wide session and weekly windows; model-scoped ones follow their general one. */
-function primaryLimitWindows(pool: LimitPool): LimitPoolWindow[] {
+function primaryLimitWindows(pool: LimitPool): Array<LimitPoolWindow | null> {
   const windows = displayLimitWindows(pool);
-  return (["session", "weekly"] as const).flatMap((kind) => {
-    const window = windows.find((candidate) => candidate.kind === kind);
-    return window === undefined ? [] : [window];
-  });
+  const primary = LIMIT_KINDS.map(
+    (kind) => windows.find((candidate) => candidate.kind === kind) ?? null,
+  );
+  return primary.some((window) => window !== null) ? primary : [];
 }
 
+/** One row of the limits grid: the provider, then its session and weekly cells. */
 function PoolLimits({
   pool,
   windows,
   nowMs,
 }: {
   readonly pool: LimitPool;
-  readonly windows: ReadonlyArray<LimitPoolWindow>;
+  readonly windows: ReadonlyArray<LimitPoolWindow | null>;
   readonly nowMs: number;
 }) {
   const label = providerClients.get(pool.driver)?.label ?? String(pool.driver);
   const color = barColor(pool.driver);
   return (
-    <div className="grid grid-cols-[6.5rem_minmax(0,1fr)] items-center gap-x-3 text-xs">
-      <span className="flex min-w-0 items-center gap-1.5 font-medium">
+    <>
+      <span className="flex min-w-0 items-center gap-1.5 font-medium leading-4">
         <ProviderInstanceIcon driverKind={pool.driver} displayName={label} size="compact" />
         <span className="truncate">{label}</span>
       </span>
-      <div className="grid grid-cols-1 gap-x-6 gap-y-1 @xl/working:grid-cols-2">
-        {windows.map((window) => {
-          const reset = window.resets[0];
-          const resetsIn = reset ? formatResetsIn(reset.member.window, nowMs) : null;
-          return (
-            <div key={`${window.kind}:${window.id}`} className="flex min-w-0 flex-col gap-0.5">
-              <span className="flex min-w-0 items-baseline gap-2 text-muted-foreground tabular-nums">
-                <span className="truncate">{window.label}</span>
-                <span className="ms-auto shrink-0 whitespace-nowrap">
-                  <span className="text-foreground">{window.remainingPercent}% left</span>
-                  {resetsIn ? ` · ${resetsIn}` : ""}
-                </span>
-              </span>
-              <span aria-hidden className="relative h-1.5 overflow-hidden rounded-full bg-muted">
-                <span
-                  className="absolute inset-y-0 left-0 rounded-full"
-                  style={{ width: `${window.remainingPercent}%`, backgroundColor: color }}
-                />
-              </span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
+      {windows.map((window, index) => {
+        if (window === null) return <span key={LIMIT_KINDS[index]} aria-hidden />;
+        const reset = window.resets[0];
+        const resetsIn = reset ? formatResetsIn(reset.member.window, nowMs) : null;
+        return (
+          <div key={LIMIT_KINDS[index]} className="flex min-w-0 flex-col gap-1">
+            <span className="flex min-w-0 items-baseline gap-2 leading-4 tabular-nums">
+              <span className="truncate text-muted-foreground">{window.label}</span>
+              <span className="ms-auto shrink-0">{window.remainingPercent}% left</span>
+            </span>
+            <span aria-hidden className="relative h-1.5 overflow-hidden rounded-full bg-muted">
+              <span
+                className="absolute inset-y-0 left-0 rounded-full"
+                style={{ width: `${window.remainingPercent}%`, backgroundColor: color }}
+              />
+            </span>
+            {resetsIn ? (
+              <span className="truncate leading-4 text-muted-foreground">{resetsIn}</span>
+            ) : null}
+          </div>
+        );
+      })}
+    </>
   );
 }

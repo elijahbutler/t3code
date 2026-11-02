@@ -102,7 +102,7 @@ export function WorkingOverviewPage() {
             <div className="flex min-w-0 flex-col gap-3">
               {total === 0 ? (
                 <p className="px-2 py-10 text-center text-sm text-muted-foreground">
-                  No threads are running and nothing finished today.
+                  No threads are running and nothing is waiting to be read.
                 </p>
               ) : (
                 WORKING_OVERVIEW_SECTIONS.map((section) => {
@@ -119,7 +119,7 @@ export function WorkingOverviewPage() {
                       >
                         {section.title}
                         <span className="font-normal tabular-nums">{entries.length}</span>
-                        {section.id === "completed" ? (
+                        {section.id === "settled" ? (
                           <span className="font-normal">· last 24 hours</span>
                         ) : null}
                       </h2>

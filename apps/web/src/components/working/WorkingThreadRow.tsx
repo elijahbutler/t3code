@@ -14,8 +14,12 @@ import { formatElapsedDurationLabel } from "../../timestampFormat";
 import type { SidebarThreadSummary } from "../../types";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import type { SidebarProviderEntry } from "../sidebar/SidebarThreadRow";
-import { resolveWorkingStartedAt, type ThreadStatusPill } from "../Sidebar.logic";
-import { latestActivityLine, type WorkingOverviewEntry } from "./workingOverview.logic";
+import { resolveWorkingStartedAt } from "../Sidebar.logic";
+import {
+  latestActivityLine,
+  type WorkingOverviewEntry,
+  type WorkingOverviewStatus,
+} from "./workingOverview.logic";
 
 /** Live rows re-read their thread's stream this often, not on every token. */
 const LIVE_ACTIVITY_INTERVAL_MS = 5_000;
@@ -149,7 +153,7 @@ export function WorkingThreadRow({
   );
 }
 
-function StatusLabel({ status }: { status: ThreadStatusPill }) {
+function StatusLabel({ status }: { status: WorkingOverviewStatus }) {
   return (
     <span className={cn("flex items-center gap-1.5 text-xs", status.colorClass)}>
       <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", status.dotClass)} />
@@ -197,11 +201,15 @@ function useLiveActivityLine(
   return enabled ? line : null;
 }
 
-function rowTiming(thread: SidebarThreadSummary, status: ThreadStatusPill, nowMs: number) {
-  const finished = status.label === "Completed" || status.label === "Failed";
-  const since = finished
-    ? (thread.latestRun?.completedAt ?? null)
-    : resolveWorkingStartedAt(thread);
+function rowTiming(thread: SidebarThreadSummary, status: WorkingOverviewStatus, nowMs: number) {
+  const finished =
+    status.label === "Settled" || status.label === "Completed" || status.label === "Failed";
+  const since =
+    status.label === "Settled"
+      ? thread.settledAt
+      : finished
+        ? (thread.latestRun?.completedAt ?? null)
+        : resolveWorkingStartedAt(thread);
   if (since === null) return null;
   const elapsed = minuteElapsedLabel(since, nowMs);
   if (elapsed === "just now") return elapsed;

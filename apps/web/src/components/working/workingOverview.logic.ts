@@ -13,9 +13,9 @@ import {
   type ThreadStatusPill,
 } from "../Sidebar.logic";
 
-export type WorkingOverviewSectionId = "needs-you" | "working" | "completed";
+export type WorkingOverviewSectionId = "needs-you" | "working" | "completed" | "settled";
 
-/** Live work first; everything that finished recently collects at the bottom. */
+/** Live work first; finished work collects at the bottom, then what was settled. */
 export const WORKING_OVERVIEW_SECTIONS: ReadonlyArray<{
   readonly id: WorkingOverviewSectionId;
   readonly title: string;
@@ -23,27 +23,42 @@ export const WORKING_OVERVIEW_SECTIONS: ReadonlyArray<{
   { id: "needs-you", title: "Needs you" },
   { id: "working", title: "Working" },
   { id: "completed", title: "Completed" },
+  { id: "settled", title: "Settled" },
 ];
 
-/** How far back Completed reaches. The sidebar only flags unseen completions. */
-const COMPLETED_WINDOW_MS = 24 * 60 * 60 * 1000;
-const MAX_COMPLETED = 30;
+/**
+ * Completed holds finished threads until they settle, which the server does per the
+ * user's auto-settle settings. Settled then lists them for this long.
+ */
+const SETTLED_WINDOW_MS = 24 * 60 * 60 * 1000;
+const MAX_ROWS_PER_FINISHED_SECTION = 30;
+
+export interface WorkingOverviewStatus extends Omit<ThreadStatusPill, "label"> {
+  readonly label: ThreadStatusPill["label"] | "Settled";
+}
 
 /** A completion the user already saw. It has no sidebar pill, so the page names it. */
-export const SEEN_COMPLETION_STATUS: ThreadStatusPill = {
+export const SEEN_COMPLETION_STATUS: WorkingOverviewStatus = {
   label: "Completed",
   colorClass: "text-muted-foreground",
   dotClass: "bg-muted-foreground/50",
   pulse: false,
 };
 
+const SETTLED_STATUS: WorkingOverviewStatus = {
+  label: "Settled",
+  colorClass: "text-muted-foreground",
+  dotClass: "bg-muted-foreground/30",
+  pulse: false,
+};
+
 export interface WorkingOverviewEntry<T> {
   readonly thread: T;
-  readonly status: ThreadStatusPill;
+  readonly status: WorkingOverviewStatus;
   /** Subagents and side chats of this thread. Idle ones have no status. */
   readonly children: ReadonlyArray<{
     readonly thread: T;
-    readonly status: ThreadStatusPill | null;
+    readonly status: WorkingOverviewStatus | null;
   }>;
 }
 
@@ -84,11 +99,15 @@ type WorkingOverviewThreadInput = Pick<
   | "pendingBackgroundTasks"
   | "blockedOnThreadWait"
   | "delegatedFrom"
+  | "settledOverride"
+  | "settledAt"
 >;
 
+const timestampMs = (iso: string | null | undefined) => Date.parse(iso ?? "") || 0;
+
 /**
- * Sorts the sidebar's visible threads by what they need from the user, and adds every
- * thread that completed in the last day, seen or not.
+ * Sorts the sidebar's visible threads by what they need from the user. Finished threads
+ * stay in Completed until they settle, then show in Settled for a day.
  */
 export function groupWorkingOverviewThreads<T extends WorkingOverviewThreadInput>(input: {
   readonly threads: ReadonlyArray<T>;
@@ -113,27 +132,42 @@ export function groupWorkingOverviewThreads<T extends WorkingOverviewThreadInput
     "needs-you": [],
     working: [],
     completed: [],
+    settled: [],
   };
   const visible = filterSidebarV2VisibleThreads(input.threads, null, input.delegatedUnderParent);
-  const completedAt = (thread: T) => Date.parse(thread.latestRun?.completedAt ?? "");
   for (const thread of sortWorkingThreadsBySend(visible)) {
     if (input.disconnectedEnvironmentIds.has(thread.environmentId)) continue;
-    const status = statusOf(thread) ?? SEEN_COMPLETION_STATUS;
-    // Completions stay a day, seen or not; anything else idle and seen is left out.
-    const recentCompletion =
-      thread.latestRun?.status === "completed" &&
-      input.nowMs - completedAt(thread) <= COMPLETED_WINDOW_MS;
-    if (status.label === "Completed" && !recentCompletion) continue;
-    if (status === null) continue;
-    sections[SECTION_BY_STATUS[status.label]].push({
+    const pill = statusOf(thread);
+    const live = pill !== null && SECTION_BY_STATUS[pill.label] !== "completed";
+    const placement: { section: WorkingOverviewSectionId; status: WorkingOverviewStatus } | null =
+      live
+        ? { section: SECTION_BY_STATUS[pill.label], status: pill }
+        : thread.settledOverride === "settled"
+          ? input.nowMs - timestampMs(thread.settledAt) <= SETTLED_WINDOW_MS
+            ? { section: "settled", status: SETTLED_STATUS }
+            : null
+          : thread.latestRun?.status === "completed"
+            ? { section: "completed", status: pill ?? SEEN_COMPLETION_STATUS }
+            : null;
+    if (placement === null) continue;
+    sections[placement.section].push({
       thread,
-      status,
+      status: placement.status,
       children: childrenByParent.get(threadKey(scopeThread(thread))) ?? [],
     });
   }
   sections.completed = sections.completed
-    .toSorted((left, right) => completedAt(right.thread) - completedAt(left.thread))
-    .slice(0, MAX_COMPLETED);
+    .toSorted(
+      (left, right) =>
+        timestampMs(right.thread.latestRun?.completedAt) -
+        timestampMs(left.thread.latestRun?.completedAt),
+    )
+    .slice(0, MAX_ROWS_PER_FINISHED_SECTION);
+  sections.settled = sections.settled
+    .toSorted(
+      (left, right) => timestampMs(right.thread.settledAt) - timestampMs(left.thread.settledAt),
+    )
+    .slice(0, MAX_ROWS_PER_FINISHED_SECTION);
   return sections;
 }
 
@@ -206,7 +240,7 @@ export interface WorkingPullRequest<T> {
     readonly snapshot: NonNullable<ThreadPullRequestLink["snapshot"]>;
   };
   readonly thread: T;
-  readonly status: ThreadStatusPill;
+  readonly status: WorkingOverviewStatus;
   /** The linked thread is working or waiting on the user right now. */
   readonly active: boolean;
 }
@@ -219,7 +253,7 @@ export function collectWorkingPullRequests<
   T extends Pick<EnvironmentThreadShell, "environmentId" | "id" | "pullRequests">,
 >(sections: WorkingOverviewSections<T>): Array<WorkingPullRequest<T>> {
   const byUrl = new Map<string, WorkingPullRequest<T>>();
-  for (const section of ["needs-you", "working", "completed"] as const) {
+  for (const section of ["needs-you", "working", "completed", "settled"] as const) {
     for (const entry of sections[section]) {
       const owners = [entry, ...entry.children.filter((child) => child.status !== null)];
       for (const { thread, status } of owners) {
@@ -232,7 +266,7 @@ export function collectWorkingPullRequests<
             link: { ...link, snapshot: link.snapshot },
             thread,
             status,
-            active: section !== "completed",
+            active: section === "needs-you" || section === "working",
           });
         }
       }
