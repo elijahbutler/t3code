@@ -9,6 +9,7 @@ import { useNowMinute } from "../../hooks/useNowMinute";
 import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { useBoringSidebarEnabled } from "../../hooks/useSettings";
 import { useSidebarProjectGroups } from "../../hooks/useSidebarProjectGroups";
+import { cn } from "../../lib/utils";
 import { workspaceAreaProps } from "../../lib/workspaceFocus";
 import { useDelegatedUnderParent, useQuietThreadShells } from "../../state/entities";
 import { useEnvironmentConnectionSummaries } from "../../state/environments";
@@ -40,6 +41,7 @@ const EXPANDED_SECTIONS_KEY = "t3code:working-overview:expanded-sections";
 /** Like the sidebar, the inbox stays open and its shelves start closed. */
 const DEFAULT_EXPANDED: ReadonlyArray<string> = ["inbox", "pull-requests"];
 const EXPANDED_SECTIONS_SCHEMA = Schema.Array(Schema.String);
+const SHELF_IDS = ["working", "snoozed", "settled"] as const;
 const SETTLED_INITIAL_COUNT = 10;
 const SETTLED_PAGE_COUNT = 25;
 
@@ -101,6 +103,8 @@ export function WorkingOverviewPage() {
       .slice(0, MAX_LIVE_ROWS)
       .map((entry) => `${entry.thread.environmentId}:${entry.thread.id}`),
   );
+  // Like the sidebar, the shelves sit at the bottom of the list and open upward.
+  const firstShelfId = SHELF_IDS.find((id) => sections[id].length > 0);
   const total = WORKING_OVERVIEW_SECTIONS.reduce(
     (count, section) => count + sections[section.id].length,
     0,
@@ -121,7 +125,7 @@ export function WorkingOverviewPage() {
         </WorkspacePageHeader>
 
         <div className="topbar-scroll-fade scrollbar-gutter-both min-h-0 flex-1 overflow-y-auto">
-          <div className="grid grid-cols-1 gap-x-4 gap-y-4 px-2 pt-6 pb-4 @4xl/working:grid-cols-[minmax(0,1fr)_minmax(16rem,22rem)]">
+          <div className="grid min-h-full grid-cols-1 gap-x-4 gap-y-4 px-2 pt-6 pb-4 @4xl/working:grid-cols-[minmax(0,1fr)_minmax(16rem,22rem)]">
             <div className="flex min-w-0 flex-col gap-3">
               {total === 0 ? (
                 <p className="px-2 py-10 text-center text-sm text-muted-foreground">
@@ -138,7 +142,11 @@ export function WorkingOverviewPage() {
                     ? groupEntriesByProject(shownEntries, projectGroups)
                     : [{ key: "all", name: null, entries: shownEntries }];
                   return (
-                    <section key={section.id} aria-label={section.title}>
+                    <section
+                      key={section.id}
+                      aria-label={section.title}
+                      className={cn(section.id === firstShelfId && "mt-auto")}
+                    >
                       <CollapsibleSectionHeader
                         expanded={expanded.includes(section.id)}
                         onClick={() => toggleSection(section.id)}
